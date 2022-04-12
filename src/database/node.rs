@@ -89,14 +89,16 @@ static MIGRATIONS: &[&str] = &[
     "CREATE TABLE channel_monitors(id INTEGER PRIMARY KEY, funding_txo_txid TEXT, funding_txo_index INTEGER, monitor_data BLOB)"
     ];
 
+#[derive(Debug)]
 pub struct NodeDatabase {
     pub path: String,
-    pub connection: Connection,
+    pub connection: Arc<Mutex<Connection>>,
 }
 
 impl NodeDatabase {
     pub fn new(path: String) -> Self {
         let connection = get_connection(&path).unwrap();
+        let connection = Arc::new(Mutex::new(connection));
         Self { connection, path }
     }
 
@@ -107,9 +109,8 @@ impl NodeDatabase {
 
 impl NodeDatabase {
     pub fn create_seed(&mut self, seed: Vec<u8>) -> Result<(), Error> {
-        let mut statement = self
-            .connection
-            .prepare_cached("INSERT INTO seed (seed) VALUES (:seed)")?;
+        let conn = self.connection.lock().unwrap();
+        let mut statement = conn.prepare_cached("INSERT INTO seed (seed) VALUES (:seed)")?;
 
         statement.execute(named_params! {
             ":seed": seed,
@@ -119,9 +120,8 @@ impl NodeDatabase {
     }
 
     pub fn get_seed(&mut self) -> Result<Option<Vec<u8>>, Error> {
-        let mut statement = self
-            .connection
-            .prepare_cached("SELECT seed.seed FROM seed")?;
+        let conn = self.connection.lock().unwrap();
+        let mut statement = conn.prepare_cached("SELECT seed.seed FROM seed")?;
         let mut rows = statement.query([])?;
 
         let row = rows.next()?;
@@ -136,9 +136,9 @@ impl NodeDatabase {
     }
 
     pub fn create_macaroon(&mut self, identifier: Vec<u8>) -> Result<(), Error> {
-        let mut statement = self
-            .connection
-            .prepare_cached("INSERT INTO macaroons (identifier) VALUES (:identifier)")?;
+        let conn = self.connection.lock().unwrap();
+        let mut statement =
+            conn.prepare_cached("INSERT INTO macaroons (identifier) VALUES (:identifier)")?;
 
         statement.execute(named_params! {
             ":identifier": identifier,
@@ -148,7 +148,8 @@ impl NodeDatabase {
     }
 
     pub fn macaroon_exists(&mut self, identifier: Vec<u8>) -> Result<bool, Error> {
-        let mut statement = self.connection.prepare_cached(
+        let conn = self.connection.lock().unwrap();
+        let mut statement = conn.prepare_cached(
             "SELECT macaroons.identifier FROM macaroons WHERE macaroons.identifier=:identifier",
         )?;
         let mut rows = statement.query(named_params! { ":identifier": identifier })?;
@@ -167,7 +168,8 @@ impl NodeDatabase {
         let hours_since_epoch = utils::hours_since_epoch().unwrap_or(u64::MAX);
         let to_hours_since_epoch = filter.to_hours_since_epoch.unwrap_or(hours_since_epoch);
 
-        let mut statement = self.connection.prepare_cached("
+        let conn = self.connection.lock().unwrap();
+        let mut statement = conn.prepare_cached("
             SELECT forwarded_payments.total_payments, forwarded_payments.total_earned_msat, forwarded_payments.hours_since_epoch, forwarded_payments.from_channel_id, forwarded_payments.to_channel_id 
             FROM forwarded_payments
             WHERE instr(forwarded_payments.from_channel_id, :from_channel_id) > 0 AND instr(forwarded_payments.to_channel_id, :to_channel_id) > 0 AND forwarded_payments.hours_since_epoch >= :from_hours_since_epoch AND forwarded_payments.hours_since_epoch <= :to_hours_since_epoch
@@ -202,7 +204,8 @@ impl NodeDatabase {
         &mut self,
         forwarded_payment: ForwardedPayment,
     ) -> Result<(), Error> {
-        let mut statement = self.connection.prepare_cached("
+        let conn = self.connection.lock().unwrap();
+        let mut statement = conn.prepare_cached("
             INSERT INTO forwarded_payments (hours_since_epoch, to_channel_id, from_channel_id, total_earned_msat) 
             VALUES (:hours_since_epoch, :to_channel_id, :from_channel_id, :fees_earned_msat) 
             ON CONFLICT
@@ -220,7 +223,8 @@ impl NodeDatabase {
     }
 
     pub fn create_or_update_payment(&mut self, payment: Payment) -> Result<(), Error> {
-        let mut statement = self.connection.prepare_cached("
+        let conn = self.connection.lock().unwrap();
+        let mut statement = conn.prepare_cached("
             INSERT INTO payments (payment_hash, preimage, secret, status, amt_msat, origin, label, invoice) 
             VALUES (:payment_hash, :preimage, :secret, :status, :amt_msat, :origin, :label, :invoice) 
             ON CONFLICT(payment_hash) 
@@ -242,16 +246,16 @@ impl NodeDatabase {
     }
 
     pub fn delete_payment(&self, payment_hash: String) -> Result<(), Error> {
-        let mut statement = self
-            .connection
+        let conn = self.connection.lock().unwrap();
+        let mut statement = conn
             .prepare_cached("DELETE FROM payments WHERE payments.payment_hash = :payment_hash")?;
         statement.execute(named_params! { ":payment_hash": payment_hash})?;
         Ok(())
     }
 
     pub fn get_payment(&self, payment_hash: String) -> Result<Option<Payment>, Error> {
-        let mut statement = self
-            .connection
+        let conn = self.connection.lock().unwrap();
+        let mut statement = conn
             .prepare_cached("SELECT payments.id, payments.created_at, payments.updated_at, payments.payment_hash, payments.preimage, payments.secret, payments.status, payments.amt_msat, payments.origin, payments.label, payments.invoice FROM payments WHERE payment_hash=:payment_hash")?;
         let mut rows = statement.query(named_params! { ":payment_hash": payment_hash })?;
 
@@ -284,8 +288,8 @@ impl NodeDatabase {
         let status_filter = filter.status.unwrap_or_else(|| String::from(""));
         let query_string = pagination.query.unwrap_or_else(|| String::from(""));
 
-        let mut count_statement = self
-            .connection
+        let conn = self.connection.lock().unwrap();
+        let mut count_statement = conn
             .prepare("SELECT COUNT(1) as cnt FROM payments WHERE instr(payments.origin, :origin) > 0 AND instr(payments.status, :status) > 0 AND (instr(payments.invoice, :query) > 0 OR instr(payments.payment_hash, :query) > 0)")?;
 
         let count = count_statement.query_row(
@@ -300,7 +304,8 @@ impl NodeDatabase {
             },
         )?;
 
-        let mut statement = self.connection.prepare_cached("
+        let mut statement = conn
+            .prepare_cached("
             SELECT payments.id, payments.created_at, payments.updated_at, payments.payment_hash, payments.preimage, payments.secret, payments.status, payments.amt_msat, payments.origin, payments.label, payments.invoice 
             FROM payments
             WHERE instr(payments.origin, :origin) > 0 AND instr(payments.status, :status) > 0 AND (instr(payments.invoice, :query) > 0 OR instr(payments.payment_hash, :query) > 0)
