@@ -18,6 +18,17 @@ use super::Error;
 use rusqlite::{named_params, Connection};
 use serde::Serialize;
 
+use lightning::chain;
+use lightning::chain::chainmonitor;
+use lightning::chain::chainmonitor::MonitorUpdateId;
+use lightning::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate};
+use lightning::chain::keysinterface::Sign;
+use lightning::chain::transaction::OutPoint;
+use lightning::chain::ChannelMonitorUpdateErr;
+use lightning::util::ser::Writeable;
+
+use std::sync::{Arc, Mutex};
+
 #[derive(Debug, Serialize, PartialEq, Clone)]
 pub struct ForwardedPayment {
     pub hours_since_epoch: u64,
@@ -74,7 +85,8 @@ static MIGRATIONS: &[&str] = &[
     "CREATE TRIGGER tg_forwarded_payments_updated AFTER UPDATE ON forwarded_payments FOR EACH ROW BEGIN UPDATE forwarded_payments SET updated_at = current_timestamp, total_payments = old.total_payments + 1 WHERE id=old.id; END;",
     "CREATE INDEX idx_from_channel_id ON forwarded_payments(from_channel_id)",
     "CREATE INDEX idx_to_channel_id ON forwarded_payments(to_channel_id)",
-    "CREATE UNIQUE INDEX idx_hours_since_epoch ON forwarded_payments(hours_since_epoch, from_channel_id, to_channel_id)"
+    "CREATE UNIQUE INDEX idx_hours_since_epoch ON forwarded_payments(hours_since_epoch, from_channel_id, to_channel_id)",
+    "CREATE TABLE channel_monitors(id INTEGER PRIMARY KEY, funding_txo_txid TEXT, funding_txo_index INTEGER, monitor_data BLOB)"
     ];
 
 pub struct NodeDatabase {
@@ -335,6 +347,58 @@ impl NodeDatabase {
             total: count,
         };
         Ok((payments, pagination))
+    }
+}
+
+impl<ChannelSigner: Sign> chainmonitor::Persist<ChannelSigner> for NodeDatabase {
+    fn persist_new_channel(
+        &self,
+        channel_id: OutPoint,
+        data: &ChannelMonitor<ChannelSigner>,
+        _update_id: MonitorUpdateId,
+    ) -> Result<(), ChannelMonitorUpdateErr> {
+        let channel_monitor_bytes = data.encode();
+        let tx_id = channel_id.txid.to_vec();
+        let tx_index = channel_id.index;
+
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| chain::ChannelMonitorUpdateErr::PermanentFailure)
+            .unwrap();
+
+        let mut statement = conn
+            .prepare_cached(
+                "
+            INSERT INTO channel_monitors (monitor_data, funding_txo_txid, funding_txo_index)
+            VALUES (:monitor_data, :funding_txo_txid, :funding_txo_index)
+        ",
+            )
+            .map_err(|_| chain::ChannelMonitorUpdateErr::PermanentFailure)?;
+
+        statement
+            .execute(named_params! {
+                ":monitor_data": channel_monitor_bytes,
+            ":funding_txo_txid": tx_id,
+            ":funding_txo_index": tx_index,
+            })
+            .map_err(|_| chain::ChannelMonitorUpdateErr::PermanentFailure)?;
+
+        Ok(())
+    }
+
+    fn update_persisted_channel(
+        &self,
+        _funding_txo: OutPoint,
+        _update: &Option<ChannelMonitorUpdate>,
+        _monitor: &ChannelMonitor<ChannelSigner>,
+        _update_id: MonitorUpdateId,
+    ) -> Result<(), ChannelMonitorUpdateErr> {
+        // TODO: This is jsut a placeholder for now.
+        if false {
+            return Err(ChannelMonitorUpdateErr::TemporaryFailure);
+        }
+        Ok(())
     }
 }
 
