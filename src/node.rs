@@ -142,7 +142,7 @@ pub type ChainMonitor = chainmonitor::ChainMonitor<
     Arc<LightningWallet>,
     Arc<LightningWallet>,
     Arc<FilesystemLogger>,
-    Arc<FilesystemPersister>,
+    Arc<NodeDatabase>,
 >;
 
 trait MustSized: Sized {}
@@ -368,6 +368,8 @@ impl LightningNode {
         let seed =
             LightningNode::find_or_create_seed(config.passphrase.clone(), &mut node_database)?;
 
+        let node_database_arc = Arc::new(NodeDatabase::new(config.node_database_path()));
+
         let cur = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap();
@@ -413,7 +415,7 @@ impl LightningNode {
             broadcaster.clone(),
             logger.clone(),
             fee_estimator.clone(),
-            persister.clone(),
+            node_database_arc.clone(),
         ));
 
         let keys_manager = Arc::new(KeysManager::new(&seed, cur.as_secs(), cur.subsec_nanos()));
